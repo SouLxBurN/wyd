@@ -1,4 +1,7 @@
 use futures_util::stream::SplitSink;
+use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,17 +21,22 @@ pub struct ChatMessage {
 pub struct Client {
     id: String,
     addr: SocketAddr,
+    connected: bool,
 }
 
 impl Client {
-    pub fn new_client(id: String, addr: SocketAddr) -> Arc<Client> {
-        Arc::new(Client{id, addr})
+    pub fn new_client(id: String, addr: SocketAddr) -> Arc<RwLock<Client>> {
+        Arc::new(RwLock::new(Client{id, addr, connected: true}))
     }
 
-    pub fn broadcast_listener(client: Arc<Client>, mut ws_write: SplitSink<WebSocketStream<TcpStream>, Message>, mut brx: Receiver<ChatMessage>) {
+    pub fn broadcast_listener(client: Arc<RwLock<Client>>, mut ws_write: SplitSink<WebSocketStream<TcpStream>, Message>, mut brx: Receiver<ChatMessage>) {
         tokio::spawn(async move {
             while let Ok(msg) = brx.recv().await {
-                if client.id != msg.client_id {
+                let cl = client.read().await;
+                if !cl.connected {
+                    break;
+                }
+                if cl.id != msg.client_id {
                     ws_write.send(
                         Message::text(
                             format!("{}|{}",
@@ -39,10 +47,14 @@ impl Client {
             eprintln!("broadcast_listener disconnected");
         });
     }
+
+    pub fn clean(&mut self) {
+        self.connected = false;
+    }
 }
 
 pub struct BroadcastServer {
-    active_clients: Vec<Client>,
+    active_clients: Arc<Mutex<HashMap<String, Arc<RwLock<Client>>>>>,
     btx: Sender<ChatMessage>,
 }
 
@@ -59,7 +71,7 @@ impl BroadcastServer {
             }
         });
         Self{
-            active_clients: vec!(),
+            active_clients: Arc::new(Mutex::new(HashMap::new())),
             btx,
         }
     }
@@ -72,12 +84,12 @@ impl BroadcastServer {
         println!("Listening on {}", addr);
         while let Ok((stream, _)) = listener.accept().await {
             tokio::spawn({
-                Self::accept_connection(stream, self.btx.clone())
+                Self::accept_connection(stream, self.active_clients.clone(), self.btx.clone())
             });
         }
     }
 
-    pub async fn accept_connection(stream: TcpStream, btx: Sender<ChatMessage>) -> anyhow::Result<Arc<Client>> {
+    pub async fn accept_connection(stream: TcpStream, clients: Arc<Mutex<HashMap<String, Arc<RwLock<Client>>>>>, btx: Sender<ChatMessage>) -> anyhow::Result<()> {
         let addr = stream.peer_addr().expect("connected streams should have a peer address");
         println!("Peer address: {}", addr);
 
@@ -91,23 +103,40 @@ impl BroadcastServer {
 
         let now = SystemTime::now();
         let now = now.duration_since(UNIX_EPOCH).expect("This is bad").as_millis();
-        let client = Client::new_client(now.to_string(), addr);
-        write.send(Message::Text(client.clone().id.to_string())).await;
+        let client_id = now.to_string();
+        let client = Client::new_client(client_id, addr);
+
+        {
+            let rwcl = client.read().await;
+            write.send(Message::Text(rwcl.id.clone())).await;
+            let mut l = clients.lock().await;
+            l.insert(rwcl.id.clone(), client.clone());
+        }
 
         Client::broadcast_listener(client.clone(), write, btx.subscribe());
-
         read.try_filter(|msg| future::ready(msg.is_text() || msg.is_binary()))
             .for_each(|msg| async {
                 // "12345|This is my message"
-                let raw = msg.unwrap().to_string();
-                let mut split = raw.split("|");
-                let cm = ChatMessage{
-                    client_id: split.next().unwrap().to_string(),
-                    message: split.next().unwrap().to_string(),
-                };
-                btx.send(cm);
+                match msg {
+                    Ok(raw) => {
+                        let raw = raw.to_string();
+                        let mut split = raw.split("|");
+                        let cm = ChatMessage{
+                            client_id: split.next().unwrap().to_string(),
+                            message: split.next().unwrap().to_string(),
+                        };
+                        btx.send(cm);
+                    },
+                    Err(e) => {
+                        let mut client_map = clients.lock().await;
+                        let cl = &mut client.write().await;
+                        client_map.remove(&cl.id);
+                        cl.clean();
+                        eprintln!("Client {} has disconnected: {e}", &cl.id);
+                    },
+                }
             }).await;
-        Ok(client)
+        Ok(())
     }
 }
 
