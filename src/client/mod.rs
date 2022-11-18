@@ -16,10 +16,10 @@ pub async fn connect_to_server() {
     let (write, mut read) = ws_stream.split();
 
     let conn_resp = read.next().await.unwrap().unwrap();
-    let client_id = conn_resp.to_string();
+    let _client_id = conn_resp.to_string();
 
     let (stdin_tx, stdin_rx) = futures_channel::mpsc::unbounded();
-    tokio::spawn(read_stdin_str(client_id, stdin_tx));
+    tokio::spawn(read_stdin_str(stdin_tx));
 
     let stdin_to_ws = stdin_rx.map(Ok).forward(write);
     let ws_to_stdout = {
@@ -33,13 +33,11 @@ pub async fn connect_to_server() {
     future::select(stdin_to_ws, ws_to_stdout).await;
 }
 
-async fn read_stdin_str(client_id: String, tx: futures_channel::mpsc::UnboundedSender<Message>) {
+async fn read_stdin_str(tx: futures_channel::mpsc::UnboundedSender<Message>) {
     let stdin = io::stdin();
     loop {
-        let mut buf = String::new();
-        stdin.read_line(&mut buf).expect("Failed to read user input");
-        let out = client_id.clone() + "|" + &buf;
-
+        let mut out = String::new();
+        stdin.read_line(&mut out).expect("Failed to read user input");
         tx.unbounded_send(Message::text(out)).unwrap();
     }
 }
