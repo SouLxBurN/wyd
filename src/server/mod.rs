@@ -3,6 +3,7 @@ mod message;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::{Mutex, RwLock};
 use tokio::sync::broadcast::{self, Sender};
 use tokio::io::AsyncWriteExt;
@@ -12,12 +13,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::server::client::Client;
-use crate::server::message::ChatMessage;
+pub use crate::server::message::ChatMessage;
 
 pub struct BroadcastServer {
     active_clients: Arc<Mutex<HashMap<String, Arc<RwLock<Client>>>>>,
     btx: Sender<ChatMessage>,
     dtx: tokio::sync::mpsc::Sender<String>,
+    locations: Arc<Mutex<HashMap<String, Vec<Arc<RwLock<Client>>>>>>,
+    middleware: Vec<Box<dyn FnMut(Receiver<ChatMessage>, Sender<ChatMessage>)>>,
 }
 
 impl BroadcastServer {
@@ -29,14 +32,17 @@ impl BroadcastServer {
             active_clients: Arc::new(Mutex::new(HashMap::new())),
             btx,
             dtx,
+            locations: Arc::new(Mutex::new(HashMap::new())),
+            middleware: vec!(),
         };
 
         // Register a listener for the server to log messages
         tokio::spawn(async move {
             while let Ok(msg) = rtx.recv().await {
                 tokio::io::stdout().write_all(
-                    format!("{} | {}",
+                    format!("{}({}) | {}\n",
                         msg.client_id,
+                        msg.loc.unwrap(),
                         msg.message
                   ).as_bytes()).await.unwrap();
             }

@@ -4,9 +4,13 @@ use futures_util::{future, pin_mut, StreamExt};
 use tokio::io::AsyncWriteExt;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
-pub async fn connect_to_server() {
+use crate::server::ChatMessage;
+
+pub async fn connect_to_server(loc: String) {
     let connect_addr =
-        env::args().nth(1).unwrap_or_else(|| panic!("this program requires at least one argument"));
+        env::args().nth(1).unwrap_or_else(|| panic!("Websocket connection string required."));
+    let loc =
+        env::args().nth(2).unwrap_or_else(|| panic!("Client Location is requied"));
 
     let url = url::Url::parse(&connect_addr).unwrap();
 
@@ -16,16 +20,19 @@ pub async fn connect_to_server() {
     let (write, mut read) = ws_stream.split();
 
     let conn_resp = read.next().await.unwrap().unwrap();
-    let _client_id = conn_resp.to_string();
+    let client_id = conn_resp.to_string();
 
     let (stdin_tx, stdin_rx) = futures_channel::mpsc::unbounded();
-    tokio::spawn(read_stdin_str(stdin_tx));
+    tokio::spawn(read_stdin_str(client_id, loc, stdin_tx));
 
     let stdin_to_ws = stdin_rx.map(Ok).forward(write);
     let ws_to_stdout = {
         read.for_each(|message| async {
             let data = message.unwrap().into_data();
-            tokio::io::stdout().write_all(&data).await.unwrap();
+            let msg: ChatMessage = serde_json::from_slice(&data).unwrap();
+            tokio::io::stdout().write_all(
+                format!("{}({}) | {}\n", msg.client_id, msg.loc.unwrap(), msg.message).as_bytes()
+            ).await.unwrap();
         })
     };
 
@@ -33,11 +40,22 @@ pub async fn connect_to_server() {
     future::select(stdin_to_ws, ws_to_stdout).await;
 }
 
-async fn read_stdin_str(tx: futures_channel::mpsc::UnboundedSender<Message>) {
+async fn read_stdin_str(client_id: String, loc: String, tx: futures_channel::mpsc::UnboundedSender<Message>) {
     let stdin = io::stdin();
     loop {
         let mut out = String::new();
         stdin.read_line(&mut out).expect("Failed to read user input");
-        tx.unbounded_send(Message::text(out)).unwrap();
+        let cm = ChatMessage{
+            client_id: client_id.clone(),
+            message: out.trim().to_owned(),
+            loc: Some(loc.clone()),
+        };
+
+        match serde_json::to_string(&cm) {
+            Ok(msg) => {
+                tx.unbounded_send(Message::text(msg)).unwrap();
+            },
+            Err(e) => eprintln!("{e}"),
+        };
     }
 }

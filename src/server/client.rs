@@ -15,6 +15,7 @@ pub type ClientID = String;
 
 pub struct Client {
     pub id: ClientID,
+    pub loc: Option<String>,
     pub addr: SocketAddr,
     pub connected: bool,
     pub ws_write: Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
@@ -33,6 +34,7 @@ impl Client {
         let client = Arc::new(RwLock::new(
             Client{
                 id,
+                loc: None,
                 addr,
                 connected: true,
                 ws_write: Arc::new(Mutex::new(ws_write)),
@@ -45,6 +47,9 @@ impl Client {
         client
     }
 
+    /// A connected clients listener to the broadcast channel.
+    /// Writes all messages to the clients write channel that
+    /// do not match the client's id.
     async fn broadcast_listener(
         client: Arc<RwLock<Client>>,
         mut brx: Receiver<ChatMessage>) {
@@ -56,9 +61,7 @@ impl Client {
                     let cl = local_client.read().await;
                     if cl.id != msg.client_id {
                         let _write = cl.ws_write.lock().await.send(
-                            Message::text(
-                                format!("{} | {}",
-                                    msg.client_id, msg.message))
+                            Message::text(serde_json::to_string(&msg).unwrap())
                         ).await;
                         // TODO Handle Errors: Backoff retries, before disconnecting.
                     }
@@ -68,6 +71,7 @@ impl Client {
         );
     }
 
+    /// Spawns a message read task for a connected client's read stream.
     async fn message_listener(
         client: Arc<RwLock<Client>>,
         read: SplitStream<WebSocketStream<TcpStream>>,
@@ -80,11 +84,10 @@ impl Client {
                     match msg {
                         Ok(raw) => {
                             let msg = raw.to_string();
-                            let cm = ChatMessage{
-                                client_id: client.read().await.id.clone(),
-                                message: msg,
-                            };
-                            let __result = btx.send(cm);
+                            let cm: ChatMessage = serde_json::from_str(&msg).unwrap();
+                            // TODO Validate the client id.
+                            client.write().await.set_location(cm.loc.clone()).await;
+                            let _result = btx.send(cm);
                         },
                         Err(e) => {
                             let clr = &mut client.write().await;
@@ -101,6 +104,10 @@ impl Client {
 
     fn register_bs_listener(&mut self, bs_listener: JoinHandle<()>) {
         self.bs_listener = Some(bs_listener);
+    }
+
+    async fn set_location(&mut self, location: Option<String>) {
+        self.loc = location;
     }
 
     pub fn clean(&mut self) {
