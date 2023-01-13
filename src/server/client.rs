@@ -11,6 +11,8 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::server::message::ChatMessage;
 
+use super::message::Payload;
+
 pub type ClientID = String;
 
 pub struct Client {
@@ -79,28 +81,34 @@ impl Client {
         btx: Sender<ChatMessage>) {
 
         tokio::spawn(async move {
-            read.try_filter(|msg| future::ready(msg.is_text() || msg.is_binary()))
-                .for_each(|msg| async {
-                    match msg {
-                        Ok(raw) => {
-                            let msg = raw.to_string();
-                            let cm: ChatMessage = serde_json::from_str(&msg).unwrap();
-                            // TODO Validate the client id.
-                            client.write().await.set_location(cm.loc.clone()).await;
-                            let _result = btx.send(cm);
-                        },
-                        Err(e) => {
-                            let clr = &mut client.write().await;
-                            if let Err(result) = disc_tx.send(clr.id.clone()).await {
-                                eprintln!("Failed to {}", result);
+            read.for_each(|msg| async {
+                match msg {
+                    Ok(raw) => {
+                        let msg = raw.to_string();
+                        let payload: Payload = serde_json::from_str(&msg).unwrap();
+                        match payload {
+                            Payload::Chat(c) => {
+                                btx.send(c).unwrap();
+                            },
+                            Payload::Location(l) => {
+                                client.write().await.set_location(Some(l.loc.clone())).await;
+                                println!("{:?}", l);
                             }
-                            clr.clean();
-                            eprintln!("Client {} has disconnected: {e}", &clr.id);
-                        },
-                    }
-                }).await;
-            });
-        }
+                        }
+                        // TODO Validate the client id.
+                    },
+                    Err(e) => {
+                        let clr = &mut client.write().await;
+                        if let Err(result) = disc_tx.send(clr.id.clone()).await {
+                            eprintln!("Failed to {}", result);
+                        }
+                        clr.clean();
+                        eprintln!("Client {} has disconnected: {e}", &clr.id);
+                    },
+                }
+            }).await;
+        });
+    }
 
     fn register_bs_listener(&mut self, bs_listener: JoinHandle<()>) {
         self.bs_listener = Some(bs_listener);

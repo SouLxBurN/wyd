@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::server::client::Client;
-pub use crate::server::message::ChatMessage;
+pub use crate::server::message::{ChatMessage, LocationMessage};
 
 pub struct BroadcastServer {
     active_clients: Arc<Mutex<HashMap<String, Arc<RwLock<Client>>>>>,
@@ -40,9 +40,8 @@ impl BroadcastServer {
         tokio::spawn(async move {
             while let Ok(msg) = rtx.recv().await {
                 tokio::io::stdout().write_all(
-                    format!("{}({}) | {}\n",
+                    format!("{}| {}\n",
                         msg.client_id,
-                        msg.loc.unwrap(),
                         msg.message
                   ).as_bytes()).await.unwrap();
             }
