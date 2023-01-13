@@ -29,7 +29,7 @@ impl Client {
         ws_read: SplitStream<WebSocketStream<TcpStream>>,
         ws_write: SplitSink<WebSocketStream<TcpStream>, Message>,
         btx: Sender<ChatMessage>,
-        dtx: tokio::sync::mpsc::Sender<ClientID>) -> Arc<RwLock<Client>> {
+        disc_tx: tokio::sync::mpsc::Sender<ClientID>) -> Arc<RwLock<Client>> {
 
         let client = Arc::new(RwLock::new(
             Client{
@@ -42,7 +42,7 @@ impl Client {
             }));
 
         Self::broadcast_listener(client.clone(), btx.subscribe()).await;
-        Self::message_listener(client.clone(), ws_read, dtx, btx).await;
+        Self::message_listener(client.clone(), ws_read, disc_tx, btx).await;
 
         client
     }
@@ -75,7 +75,7 @@ impl Client {
     async fn message_listener(
         client: Arc<RwLock<Client>>,
         read: SplitStream<WebSocketStream<TcpStream>>,
-        dtx: tokio::sync::mpsc::Sender<ClientID>,
+        disc_tx: tokio::sync::mpsc::Sender<ClientID>,
         btx: Sender<ChatMessage>) {
 
         tokio::spawn(async move {
@@ -91,7 +91,7 @@ impl Client {
                         },
                         Err(e) => {
                             let clr = &mut client.write().await;
-                            if let Err(result) = dtx.send(clr.id.clone()).await {
+                            if let Err(result) = disc_tx.send(clr.id.clone()).await {
                                 eprintln!("Failed to {}", result);
                             }
                             clr.clean();

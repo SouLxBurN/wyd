@@ -18,7 +18,7 @@ pub use crate::server::message::ChatMessage;
 pub struct BroadcastServer {
     active_clients: Arc<Mutex<HashMap<String, Arc<RwLock<Client>>>>>,
     btx: Sender<ChatMessage>,
-    dtx: tokio::sync::mpsc::Sender<String>,
+    disc_tx: tokio::sync::mpsc::Sender<String>,
     locations: Arc<Mutex<HashMap<String, Vec<Arc<RwLock<Client>>>>>>,
     middleware: Vec<Box<dyn FnMut(Receiver<ChatMessage>, Sender<ChatMessage>)>>,
 }
@@ -26,12 +26,12 @@ pub struct BroadcastServer {
 impl BroadcastServer {
     pub fn start() -> Self {
         let (btx, mut rtx) = broadcast::channel::<ChatMessage>(16);
-        let (dtx, mut rdtx) = tokio::sync::mpsc::channel::<String>(6);
+        let (disc_tx, mut r_disc_tx) = tokio::sync::mpsc::channel::<String>(6);
 
         let server = Self{
             active_clients: Arc::new(Mutex::new(HashMap::new())),
             btx,
-            dtx,
+            disc_tx,
             locations: Arc::new(Mutex::new(HashMap::new())),
             middleware: vec!(),
         };
@@ -51,7 +51,7 @@ impl BroadcastServer {
         // Listen for disconnect events to remove clients/victims
         let ac = server.active_clients.clone();
         tokio::spawn(async move {
-            while let Some(victim) = rdtx.recv().await {
+            while let Some(victim) = r_disc_tx.recv().await {
                 let mut client_map = ac.lock().await;
                 client_map.remove(&victim);
             }
@@ -71,7 +71,7 @@ impl BroadcastServer {
                 Self::accept_connection(
                     stream,
                     self.active_clients.clone(),
-                    self.dtx.clone(),
+                    self.disc_tx.clone(),
                     self.btx.clone())
             });
         }
@@ -80,7 +80,7 @@ impl BroadcastServer {
     pub async fn accept_connection(
         stream: TcpStream,
         clients: Arc<Mutex<HashMap<String, Arc<RwLock<Client>>>>>,
-        dtx: tokio::sync::mpsc::Sender<String>,
+        disc_tx: tokio::sync::mpsc::Sender<String>,
         btx: Sender<ChatMessage>) -> anyhow::Result<()> {
 
         let addr = stream.peer_addr().expect("connected streams should have a peer address");
@@ -96,7 +96,7 @@ impl BroadcastServer {
         let now = SystemTime::now();
         let now = now.duration_since(UNIX_EPOCH).expect("This is bad").as_millis();
         let client_id = now.to_string();
-        let client = Client::new_client(client_id, addr, read, write, btx, dtx).await;
+        let client = Client::new_client(client_id, addr, read, write, btx, disc_tx).await;
 
         let rwcl = client.read().await;
         let mut l = clients.lock().await;

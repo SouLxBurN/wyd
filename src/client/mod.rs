@@ -6,7 +6,7 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 use crate::server::ChatMessage;
 
-pub async fn connect_to_server(loc: String) {
+pub async fn connect_to_server() {
     let connect_addr =
         env::args().nth(1).unwrap_or_else(|| panic!("Websocket connection string required."));
     let loc =
