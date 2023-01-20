@@ -47,7 +47,7 @@ async fn read_stdin_str(client_id: String, tx: futures_channel::mpsc::UnboundedS
         let outbound: String = if let Some(location) = out.strip_prefix("loc:") {
             let lm = LocationMessage{
                 client_id: client_id.clone(),
-                loc: location.trim().to_owned(),
+                location: location.trim().to_owned(),
             };
             serde_json::to_string(&lm).unwrap()
         } else {

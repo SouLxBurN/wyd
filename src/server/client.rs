@@ -1,26 +1,24 @@
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::broadcast::{Receiver, Sender};
-use futures_util::{future, StreamExt, TryStreamExt, SinkExt};
+use futures_util::{StreamExt, SinkExt};
 use tokio_tungstenite::tungstenite::Message;
 use futures_util::stream::{SplitSink, SplitStream};
 use tokio::task::JoinHandle;
 use std::net::SocketAddr;
 use tokio_tungstenite::WebSocketStream;
-
-use crate::server::message::ChatMessage;
-
 use super::message::Payload;
 
 pub type ClientID = String;
 
+#[derive(Debug)]
 pub struct Client {
     pub id: ClientID,
-    pub loc: Option<String>,
+    pub location: Option<String>,
     pub addr: SocketAddr,
     pub connected: bool,
-    pub ws_write: Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
+    pub ws_write: Arc<RwLock<SplitSink<WebSocketStream<TcpStream>, Message>>>,
     bs_listener: Option<JoinHandle<()>>,
 }
 
@@ -30,16 +28,16 @@ impl Client {
         addr: SocketAddr,
         ws_read: SplitStream<WebSocketStream<TcpStream>>,
         ws_write: SplitSink<WebSocketStream<TcpStream>, Message>,
-        btx: Sender<ChatMessage>,
+        btx: Sender<Payload>,
         disc_tx: tokio::sync::mpsc::Sender<ClientID>) -> Arc<RwLock<Client>> {
 
         let client = Arc::new(RwLock::new(
             Client{
                 id,
-                loc: None,
+                location: None,
                 addr,
                 connected: true,
-                ws_write: Arc::new(Mutex::new(ws_write)),
+                ws_write: Arc::new(RwLock::new(ws_write)),
                 bs_listener: None
             }));
 
@@ -54,18 +52,21 @@ impl Client {
     /// do not match the client's id.
     async fn broadcast_listener(
         client: Arc<RwLock<Client>>,
-        mut brx: Receiver<ChatMessage>) {
+        mut brx: Receiver<Payload>) {
 
         let local_client = client.clone();
         client.write().await.register_bs_listener(
             tokio::spawn(async move {
                 while let Ok(msg) = brx.recv().await {
                     let cl = local_client.read().await;
-                    if cl.id != msg.client_id {
-                        let _write = cl.ws_write.lock().await.send(
-                            Message::text(serde_json::to_string(&msg).unwrap())
-                        ).await;
-                        // TODO Handle Errors: Backoff retries, before disconnecting.
+
+                    if let Payload::Chat(cm) = msg {
+                        if cl.id != cm.client_id {
+                            let _write = cl.ws_write.write().await.send(
+                                Message::text(serde_json::to_string(&cm).unwrap())
+                            ).await;
+                            // TODO Handle Errors: Backoff retries, before disconnecting.
+                        }
                     }
                 }
                 eprintln!("broadcast_listener disconnected");
@@ -78,7 +79,7 @@ impl Client {
         client: Arc<RwLock<Client>>,
         read: SplitStream<WebSocketStream<TcpStream>>,
         disc_tx: tokio::sync::mpsc::Sender<ClientID>,
-        btx: Sender<ChatMessage>) {
+        btx: Sender<Payload>) {
 
         tokio::spawn(async move {
             read.for_each(|msg| async {
@@ -86,15 +87,7 @@ impl Client {
                     Ok(raw) => {
                         let msg = raw.to_string();
                         let payload: Payload = serde_json::from_str(&msg).unwrap();
-                        match payload {
-                            Payload::Chat(c) => {
-                                btx.send(c).unwrap();
-                            },
-                            Payload::Location(l) => {
-                                client.write().await.set_location(Some(l.loc.clone())).await;
-                                println!("{:?}", l);
-                            }
-                        }
+                        btx.send(payload).unwrap();
                         // TODO Validate the client id.
                     },
                     Err(e) => {
@@ -114,8 +107,8 @@ impl Client {
         self.bs_listener = Some(bs_listener);
     }
 
-    async fn set_location(&mut self, location: Option<String>) {
-        self.loc = location;
+    pub fn set_location(&mut self, location: String) {
+        self.location = Some(location);
     }
 
     pub fn clean(&mut self) {

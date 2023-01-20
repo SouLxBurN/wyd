@@ -9,7 +9,7 @@ pub struct ChatMessage {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LocationMessage {
     pub client_id: String,
-    pub loc: String,
+    pub location: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
