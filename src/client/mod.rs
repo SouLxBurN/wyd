@@ -1,24 +1,31 @@
-use std::{env, io};
+use std::io;
 
-use futures_util::{future, pin_mut, StreamExt};
+use futures_util::stream::SplitSink;
+use futures_util::{future, pin_mut, SinkExt, StreamExt};
 use tokio::io::AsyncWriteExt;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio::net::TcpStream;
+use tokio_tungstenite::{
+    connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
+};
 
 use crate::server::{ChatMessage, LocationMessage};
 
-pub async fn connect_to_server() {
-    let connect_addr =
-        env::args().nth(1).unwrap_or_else(|| panic!("Websocket connection string required."));
+pub struct ConnectionDetails {
+    pub addr: String,
+    pub init_location: String,
+}
 
-    let url = url::Url::parse(&connect_addr).unwrap();
+pub async fn connect_to_server(details: ConnectionDetails) {
+    let url = url::Url::parse(&details.addr).unwrap();
 
     let (ws_stream, _) = connect_async(url).await.expect("Failed to connect");
     println!("WebSocket handshake has been successfully completed");
 
-    let (write, mut read) = ws_stream.split();
+    let (mut write, mut read) = ws_stream.split();
 
     let conn_resp = read.next().await.unwrap().unwrap();
     let client_id = conn_resp.to_string();
+    send_initial_location(client_id.clone(), details.init_location, &mut write).await;
 
     let (stdin_tx, stdin_rx) = futures_channel::mpsc::unbounded();
     tokio::spawn(read_stdin_str(client_id, stdin_tx));
@@ -28,9 +35,10 @@ pub async fn connect_to_server() {
         read.for_each(|message| async {
             let data = message.unwrap().into_data();
             let msg: ChatMessage = serde_json::from_slice(&data).unwrap();
-            tokio::io::stdout().write_all(
-                format!("{}| {}\n", msg.client_id, msg.message).as_bytes()
-            ).await.unwrap();
+            tokio::io::stdout()
+                .write_all(format!("{}| {}\n", msg.client_id, msg.message).as_bytes())
+                .await
+                .unwrap();
         })
     };
 
@@ -38,20 +46,36 @@ pub async fn connect_to_server() {
     future::select(stdin_to_ws, ws_to_stdout).await;
 }
 
+async fn send_initial_location(
+    client_id: String,
+    location: String,
+    write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+) {
+    let init_loc = LocationMessage {
+        client_id,
+        location,
+    };
+    let _out = write
+        .send(Message::text(serde_json::to_string(&init_loc).unwrap()))
+        .await;
+}
+
 async fn read_stdin_str(client_id: String, tx: futures_channel::mpsc::UnboundedSender<Message>) {
     let stdin = io::stdin();
     loop {
         let mut out = String::new();
-        stdin.read_line(&mut out).expect("Failed to read user input");
+        stdin
+            .read_line(&mut out)
+            .expect("Failed to read user input");
 
         let outbound: String = if let Some(location) = out.strip_prefix("loc:") {
-            let lm = LocationMessage{
+            let lm = LocationMessage {
                 client_id: client_id.clone(),
                 location: location.trim().to_owned(),
             };
             serde_json::to_string(&lm).unwrap()
         } else {
-            let cm = ChatMessage{
+            let cm = ChatMessage {
                 client_id: client_id.clone(),
                 message: out.trim().to_owned(),
             };

@@ -38,7 +38,6 @@ impl BroadcastServer {
             middleware: vec!(),
         };
 
-
         // Register a listener for the server to log messages
         tokio::spawn(
             BroadcastServer::internal_server_listener(
