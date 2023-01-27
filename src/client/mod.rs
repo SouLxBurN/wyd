@@ -7,8 +7,8 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::{
     connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
 };
-
-use crate::server::{ChatMessage, LocationMessage};
+use crate::client::Payload::{Chat, Location, Presence};
+use crate::server::{Payload, ChatMessage, LocationMessage};
 
 pub struct ConnectionDetails {
     pub addr: String,
@@ -34,11 +34,24 @@ pub async fn connect_to_server(details: ConnectionDetails) {
     let ws_to_stdout = {
         read.for_each(|message| async {
             let data = message.unwrap().into_data();
-            let msg: ChatMessage = serde_json::from_slice(&data).unwrap();
+            let msg: Payload = serde_json::from_slice(&data).unwrap();
+
+            let output = match msg {
+                Chat(message) => {
+                    format!("{}| {}\n", message.client_id, message.message)
+                },
+                Location(_message) => {
+                    format!("Why did I get a location message?\n")
+                },
+                Presence(message) => {
+                    format!("Clients: {:?}\n", message.clients)
+                },
+            };
+
             tokio::io::stdout()
-                .write_all(format!("{}| {}\n", msg.client_id, msg.message).as_bytes())
+                .write_all(output.as_bytes())
                 .await
-                .unwrap();
+                .unwrap()
         })
     };
 

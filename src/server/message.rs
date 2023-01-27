@@ -13,8 +13,15 @@ pub struct LocationMessage {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PresenceMessage {
+    pub location: String,
+    pub clients: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(untagged)]
 pub enum Payload {
     Chat(ChatMessage),
     Location(LocationMessage),
+    Presence(PresenceMessage),
 }

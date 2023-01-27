@@ -13,9 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::server::client::Client;
-pub use crate::server::message::{ChatMessage, LocationMessage};
-
-use self::message::Payload;
+pub use self::message::{Payload, ChatMessage, LocationMessage, PresenceMessage};
 
 pub struct BroadcastServer {
     active_clients: Arc<RwLock<HashMap<String, Arc<RwLock<Client>>>>>,
@@ -48,9 +46,13 @@ impl BroadcastServer {
 
         // Listen for disconnect events to remove clients/victims
         let ac = server.active_clients.clone();
+        let locs = server.locations.clone();
         tokio::spawn(async move {
             while let Some(victim) = r_disc_tx.recv().await {
                 let mut client_map = ac.write().await;
+                if let Some(client) = client_map.get(&victim) {
+                    Self::remove_client_from_current_location(client.clone(), locs.clone()).await;
+                }
                 client_map.remove(&victim);
             }
         });
@@ -113,38 +115,24 @@ impl BroadcastServer {
         while let Ok(msg) = rtx.recv().await {
             let (client_id, location, out) = match msg {
                 Payload::Chat(message) => {
-                    let mut location = String::from("");
-                    if let Some(client) = active_clients.read().await.get(&message.client_id) {
-                        if let Some(loc) = &client.read().await.location {
-                            location = loc.to_string();
-                        }
-                    }
+                    let location = Self::get_active_location(&message.client_id, active_clients.clone()).await.unwrap_or_default();
                     (message.client_id, location, message.message)
                 },
                 Payload::Location(message) => {
                     let new_location = &message.location;
-
                     if let Some(client) = active_clients.read().await.get(&message.client_id) {
-                        let cc_clone = client.clone();
-                        let mut rw_client = cc_clone.write().await;
-                        if let Some(client_location) = &rw_client.location {
-                            if let Some(location_clients) = locations.write().await.get_mut(client_location) {
-                                location_clients.retain_mut(|c| !Arc::ptr_eq(c, &client.clone()));
-                            }
-                        }
-
-                        rw_client.set_location(new_location.to_string());
-                        let mut rw_locations = locations.write().await;
-                        if let Some(location_clients) = rw_locations.get_mut(new_location) {
-                            location_clients.push(client.clone());
-                        } else {
-                            rw_locations.insert(new_location.to_string(), vec!(client.clone()));
-                        }
-
+                        Self::remove_client_from_current_location(client.clone(), locations.clone()).await;
+                        Self::add_client_to_location(client.clone(), &new_location, locations.clone()).await;
+                        Self::send_location_response(client.clone(), &new_location, locations.clone()).await;
                         (message.client_id, new_location.to_owned(), message.location)
                     } else {
+                        // If client isn't considered active, ignore request.
                         continue;
                     }
+                },
+                Payload::Presence(_message) => {
+                    // Server shouldn't recieve presence payloads.
+                    continue;
                 },
             };
 
@@ -165,6 +153,54 @@ impl BroadcastServer {
                     location,
                     out
                 ).as_bytes()).await.unwrap();
+        }
+    }
+
+    async fn get_active_location(client_id: &str, active_clients: Arc<RwLock<HashMap<String, Arc<RwLock<Client>>>>>) -> Option<String> {
+        if let Some(client) = active_clients.read().await.get(client_id) {
+            if let Some(loc) = &client.read().await.location {
+                return Some(loc.to_string())
+            }
+        }
+        None
+    }
+
+    async fn remove_client_from_current_location(client: Arc<RwLock<Client>>, locations: Arc<RwLock<HashMap<String, Vec<Arc<RwLock<Client>>>>>>) {
+        let rw_client = client.write().await;
+
+        if let Some(client_location) = &rw_client.location {
+            if let Some(location_clients) = locations.write().await.get_mut(client_location) {
+                location_clients.retain_mut(|c| !Arc::ptr_eq(c, &client.clone()));
+            }
+        }
+    }
+
+    async fn add_client_to_location(client: Arc<RwLock<Client>>, location: &str, locations: Arc<RwLock<HashMap<String, Vec<Arc<RwLock<Client>>>>>>) {
+        let mut rw_client = client.write().await;
+
+        rw_client.set_location(location.to_string());
+        let mut rw_locations = locations.write().await;
+        if let Some(location_clients) = rw_locations.get_mut(location) {
+            location_clients.push(client.clone());
+        } else {
+            rw_locations.insert(location.to_string(), vec!(client.clone()));
+        }
+    }
+
+    async fn send_location_response(client: Arc<RwLock<Client>>, location: &str, locations: Arc<RwLock<HashMap<String, Vec<Arc<RwLock<Client>>>>>>) {
+        let rw_locations = locations.write().await;
+
+        if let Some(location_clients) = rw_locations.get(location) {
+            let mut clients = Vec::new();
+            for client in location_clients.iter() {
+                clients.push(client.read().await.id.clone());
+            };
+            let response = PresenceMessage{
+                clients,
+                location: location.to_string(),
+            };
+            let rw_client = client.write().await;
+            let _ = rw_client.ws_write.write().await.send(Message::Text(serde_json::to_string(&response).unwrap())).await;
         }
     }
 }
