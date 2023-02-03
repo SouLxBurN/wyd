@@ -25,7 +25,7 @@ pub async fn connect_to_server(details: ConnectionDetails) {
 
     let conn_resp = read.next().await.unwrap().unwrap();
     let client_id = conn_resp.to_string();
-    send_initial_location(client_id.clone(), details.init_location, &mut write).await;
+    send_location(client_id.clone(), details.init_location, &mut write).await;
 
     let (stdin_tx, stdin_rx) = futures_channel::mpsc::unbounded();
     tokio::spawn(read_stdin_str(client_id, stdin_tx));
@@ -59,7 +59,7 @@ pub async fn connect_to_server(details: ConnectionDetails) {
     future::select(stdin_to_ws, ws_to_stdout).await;
 }
 
-async fn send_initial_location(
+async fn send_location(
     client_id: String,
     location: String,
     write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,

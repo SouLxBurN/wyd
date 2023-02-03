@@ -15,11 +15,14 @@ use std::sync::Arc;
 use crate::server::client::Client;
 pub use self::message::{Payload, ChatMessage, LocationMessage, PresenceMessage};
 
+type ClientLocationMap = Arc<RwLock<HashMap<String, Vec<Arc<RwLock<Client>>>>>>;
+type ActiveClientMap = Arc<RwLock<HashMap<String, Arc<RwLock<Client>>>>>;
+
 pub struct BroadcastServer {
-    active_clients: Arc<RwLock<HashMap<String, Arc<RwLock<Client>>>>>,
+    active_clients: ActiveClientMap,
     btx: Sender<Payload>,
     disc_tx: tokio::sync::mpsc::Sender<String>,
-    locations: Arc<RwLock<HashMap<String, Vec<Arc<RwLock<Client>>>>>>,
+    locations: ClientLocationMap,
     middleware: Vec<Box<dyn FnMut(Receiver<Payload>, Sender<Payload>)>>,
 }
 
@@ -79,7 +82,7 @@ impl BroadcastServer {
 
     pub async fn accept_connection(
         stream: TcpStream,
-        clients: Arc<RwLock<HashMap<String, Arc<RwLock<Client>>>>>,
+        clients: ActiveClientMap,
         disc_tx: tokio::sync::mpsc::Sender<String>,
         btx: Sender<Payload>) -> anyhow::Result<()> {
 
@@ -109,8 +112,8 @@ impl BroadcastServer {
 
     async fn internal_server_listener(
         mut rtx: tokio::sync::broadcast::Receiver<Payload>,
-        active_clients: Arc<RwLock<HashMap<String, Arc<RwLock<Client>>>>>,
-        locations: Arc<RwLock<HashMap<String, Vec<Arc<RwLock<Client>>>>>>,
+        active_clients: ActiveClientMap,
+        locations: ClientLocationMap,
     ) {
         while let Ok(msg) = rtx.recv().await {
             let (client_id, location, out) = match msg {
@@ -156,7 +159,7 @@ impl BroadcastServer {
         }
     }
 
-    async fn get_active_location(client_id: &str, active_clients: Arc<RwLock<HashMap<String, Arc<RwLock<Client>>>>>) -> Option<String> {
+    async fn get_active_location(client_id: &str, active_clients: ActiveClientMap) -> Option<String> {
         if let Some(client) = active_clients.read().await.get(client_id) {
             if let Some(loc) = &client.read().await.location {
                 return Some(loc.to_string())
@@ -165,7 +168,7 @@ impl BroadcastServer {
         None
     }
 
-    async fn remove_client_from_current_location(client: Arc<RwLock<Client>>, locations: Arc<RwLock<HashMap<String, Vec<Arc<RwLock<Client>>>>>>) {
+    async fn remove_client_from_current_location(client: Arc<RwLock<Client>>, locations: ClientLocationMap) {
         let rw_client = client.write().await;
 
         if let Some(client_location) = &rw_client.location {
@@ -175,7 +178,7 @@ impl BroadcastServer {
         }
     }
 
-    async fn add_client_to_location(client: Arc<RwLock<Client>>, location: &str, locations: Arc<RwLock<HashMap<String, Vec<Arc<RwLock<Client>>>>>>) {
+    async fn add_client_to_location(client: Arc<RwLock<Client>>, location: &str, locations: ClientLocationMap) {
         let mut rw_client = client.write().await;
 
         rw_client.set_location(location.to_string());
@@ -187,7 +190,7 @@ impl BroadcastServer {
         }
     }
 
-    async fn send_location_response(client: Arc<RwLock<Client>>, location: &str, locations: Arc<RwLock<HashMap<String, Vec<Arc<RwLock<Client>>>>>>) {
+    async fn send_location_response(client: Arc<RwLock<Client>>, location: &str, locations: ClientLocationMap) {
         let rw_locations = locations.write().await;
 
         if let Some(location_clients) = rw_locations.get(location) {
